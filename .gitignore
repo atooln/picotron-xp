@@ -8,3 +8,4 @@ tmp
 debug
 bench
 sandbox
+*_safetensors/
