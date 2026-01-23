@@ -4,10 +4,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from picotron.context_parallel import context_parallel
-from flash_attn.flash_attn_interface import flash_attn_func
-from flash_attn.layers.rotary import apply_rotary_emb
-from flash_attn.ops.triton.layer_norm import layer_norm_fn
 import picotron.process_group_manager as pgm
+
+# Conditionally import flash_attn - not available on macOS
+try:
+    from flash_attn.flash_attn_interface import flash_attn_func
+    from flash_attn.layers.rotary import apply_rotary_emb
+    from flash_attn.ops.triton.layer_norm import layer_norm_fn
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    FLASH_ATTN_AVAILABLE = False
+    # Define dummy functions to avoid NameError
+    def flash_attn_func(*args, **kwargs):
+        raise RuntimeError("flash_attn is not available. Set FLASH_ATTEN=0 to use PyTorch attention.")
+    def apply_rotary_emb(*args, **kwargs):
+        raise RuntimeError("flash_attn is not available. Set FLASH_ATTEN=0 to use PyTorch attention.")
+    def layer_norm_fn(*args, **kwargs):
+        raise RuntimeError("flash_attn is not available. Set FLASH_ATTEN=0 to use PyTorch attention.")
 
 def apply_rotary_pos_emb(x, cos, sin):
     #TODO: Maybe do class RotaryEmbedding(nn.Module) later
@@ -124,7 +137,8 @@ class Attention(nn.Module):
         q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
         k = self.k_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
         v = self.v_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
-        if os.getenv('FLASH_ATTEN', '1') != '1':
+        use_flash_attn = os.getenv('FLASH_ATTEN', '1') == '1' and FLASH_ATTN_AVAILABLE
+        if not use_flash_attn:
             q = q.view(batch_size, seq_length, self.num_local_heads, self.head_dim).transpose(1, 2)       # [batch_size, num_heads, seq_length, head_dim]
             k = k.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
             v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
@@ -149,7 +163,7 @@ class Attention(nn.Module):
             # Ring attention for context parallelism
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
             out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
-        elif os.getenv('FLASH_ATTEN', '1') == '1':
+        elif use_flash_attn:
             # flash attention, this is faster! 
             out = flash_attention(q, k, v, causal = causal) # [batch_size, seq_length, num_heads, head_dim] 
         else:
@@ -215,7 +229,8 @@ class DecoderLayer(nn.Module):
     # RMSNorm -> Attention -> Residual -> RMSNorm -> MLP -> Residual
     def __init__(self, config, layer_idx):
         super().__init__()
-        RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
+        use_flash_attn = os.getenv('FLASH_ATTEN', '1') == '1' and FLASH_ATTN_AVAILABLE
+        RMSNorm = LlamaRMSNorm if not use_flash_attn else TritonRMSNorm
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.attention = Attention(config, layer_idx = layer_idx)
@@ -271,7 +286,8 @@ class Llama(nn.Module):
         self.embedding = Embedding(self.vocab_size, self.hidden_size)
         self.decoder_layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
         self.final_proj = FinalProjection(self.hidden_size, self.vocab_size, bias=False)
-        RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
+        use_flash_attn = os.getenv('FLASH_ATTEN', '1') == '1' and FLASH_ATTN_AVAILABLE
+        RMSNorm = LlamaRMSNorm if not use_flash_attn else TritonRMSNorm
         self.final_norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
 
         self.reset_parameters()

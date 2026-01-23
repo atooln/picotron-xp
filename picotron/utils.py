@@ -62,7 +62,11 @@ def get_num_params(model):
     
     # Count parameters in current PP rank
     local_num_params = 0
+    device = None
     for name, param in model.named_parameters():
+        # Get device from first parameter
+        if device is None:
+            device = param.device
         # Parameters split across TP ranks
         # TODO: LayerNorm is also split across TP ranks for sequence parallelism
         if any(tp_keyword in name.lower() for tp_keyword in ['attention', 'mlp', 'embed', 'final_proj']):
@@ -70,9 +74,13 @@ def get_num_params(model):
         else:
             # Parameters replicated across TP ranks (layer norm, biases)
             local_num_params += param.numel()
+    
+    # If no parameters found, default to CPU
+    if device is None:
+        device = torch.device('cpu')
             
     # Gather parameter counts from all PP ranks
-    param_counts = torch.tensor(local_num_params, device='cuda')
+    param_counts = torch.tensor(local_num_params, device=device)
     
     # Sum up parameters across all PP ranks
     dist.all_reduce(param_counts, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.pp_group)

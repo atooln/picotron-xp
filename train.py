@@ -26,6 +26,15 @@ from picotron.model import Llama
 from picotron.utils import download_model
 import wandb
 
+def get_memory_usage_gb(device):
+    """Get memory usage in GB for the given device."""
+    if torch.cuda.is_available() and device.type == "cuda":
+        return torch.cuda.memory_reserved(device) / 1e9
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and device.type == "mps":
+        return torch.mps.current_allocated_memory() / 1e9
+    else:
+        return 0.0  # CPU doesn't have a direct memory API
+
 def train_step(model, data_loader, device):
     acc_loss = 0.0
     
@@ -254,7 +263,7 @@ if __name__ == "__main__":
                 f"Tokens/s/GPU: {to_readable_format(tokens_per_second_per_gpu):>7s} | "
                 f"Tokens: {to_readable_format(trained_tokens):>7s}{('/' + to_readable_format(config['training']['max_tokens'])) if config['training']['max_tokens'] else ''} | "
                 f"MFU: {mfu:5.2f}% | "
-                f"Memory usage: {torch.cuda.memory_reserved() / 1e9:6.2f}GB",
+                f"Memory usage: {get_memory_usage_gb(device):6.2f}GB",
                 is_print_rank=is_wandb_rank
             )
         
@@ -265,7 +274,7 @@ if __name__ == "__main__":
                     "tokens_per_second": tokens_per_step / step_duration,
                     "mfu": mfu,
                     "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
-                    "memory_usage": torch.cuda.memory_reserved() / 1e9,
+                    "memory_usage": get_memory_usage_gb(device),
                     "trained_tokens": trained_tokens
                 })
         
