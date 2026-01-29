@@ -15,7 +15,7 @@ from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel
 import picotron.process_group_manager as pgm
-from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params
+from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params, get_theoretical_flops
 from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
 from picotron.data import MicroBatchDataLoader
@@ -251,7 +251,8 @@ if __name__ == "__main__":
         step_duration = time.time() - step_start_time
         tokens_per_second = tokens_per_step / step_duration
         tokens_per_second_per_gpu = tokens_per_second / world_size
-        mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config)
+        theoretical_flops = get_theoretical_flops(device)
+        mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config, theoretical_flops=theoretical_flops)
         
         if is_wandb_rank:
             print(

@@ -37,10 +37,52 @@ def to_readable_format(num, precision=2):
     else:
         return f"{num:.{precision}f}"
 
-# ref: 
-# https://github.com/karpathy/nanoGPT/blob/9755682b981a45507f6eb9b11eadef8cb83cebd5/model.py#L289
-# https://github.com/stanford-cs336/spring2024-lectures/blob/main/lecture_02.py#L950
-def get_mfu(tokens_per_second, num_params, model_config, theoretical_flops = 989.5 * 10 ** 12):
+import subprocess
+
+def get_apple_silicon_flops():
+    try:
+        command = ["sysctl", "-n", "machdep.cpu.brand_string"]
+        output = subprocess.check_output(command).decode().strip()
+        
+        # Approximate FP32 TFLOPS based on GPU benchmarks
+        flops_map = {
+            "M1": 2.6e12,
+            "M1 Pro": 5.2e12,
+            "M1 Max": 10.4e12,
+            "M1 Ultra": 21e12,
+            "M2": 3.6e12,
+            "M2 Pro": 6.8e12,
+            "M2 Max": 13.6e12,
+            "M2 Ultra": 27e12,
+            "M3": 4.3e12,
+            "M3 Pro": 7.3e12,
+            "M3 Max": 14e12,
+            "M3 Ultra": 28e12,
+        }
+
+        # Sort keys by length descending to ensure "M1 Max" matches before "M1"
+        sorted_keys = sorted(flops_map.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            if key in output:
+                return flops_map[key]
+        
+        raise ValueError(f"Unknown Apple Silicon: {output}")
+    except Exception as e:
+        raise ValueError(f"Error getting Apple Silicon FLOPS: {e}")
+
+def get_theoretical_flops(device):
+    if device.type == "mps":
+        flops = get_apple_silicon_flops()
+        if flops:
+            return flops
+    
+    # Default to H100 if unknown
+    return 989.5 * 10 ** 12
+
+def get_mfu(tokens_per_second, num_params, model_config, theoretical_flops=None):
+    if theoretical_flops is None:
+        theoretical_flops = 989.5 * 10 ** 12
+    
     num_layers = model_config.num_hidden_layers
     hidden_dim = model_config.hidden_size
     seq_len = model_config.max_position_embeddings
