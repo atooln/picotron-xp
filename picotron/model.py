@@ -37,7 +37,7 @@ def get_cos_sin(seq_length, head_dim, base=500000.0):
     theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
     dtype = torch.bfloat16 if os.getenv('DTYPE', 'bfloat16') == 'bfloat16' else torch.float32
     local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device('cuda', local_rank) if os.getenv('DEVICE', 'cuda') == 'cuda' else torch.device('cpu')
+    device = torch.device('cuda', local_rank) if os.getenv('DEVICE', 'cuda') == 'cuda' else torch.device('mps')
     position = torch.arange(seq_length).to(device).unsqueeze(1).float() # [seq_length, 1]
     # To match transformers implementation. m * theta should be computed on GPU
     theta = theta.to(device)

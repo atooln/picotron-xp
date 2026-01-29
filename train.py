@@ -74,7 +74,7 @@ if __name__ == "__main__":
     os.environ["OMP_NUM_THREADS"] = config["environment"]["OMP_NUM_THREADS"]
     os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
     os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"]
-    os.environ["DEVICE"] = "cpu" if config["distributed"]["use_cpu"] else "cuda"
+    os.environ["DEVICE"] = "cpu" if config["distributed"]["use_cpu"] else "cuda" if torch.cuda.is_available() else "mps"
     if config["environment"].get("HF_TOKEN") is None:
         if "HF_TOKEN" not in os.environ: raise ValueError("HF_TOKEN is neither set in the config file nor in the environment")
     else:
@@ -82,14 +82,14 @@ if __name__ == "__main__":
             os.environ["HF_TOKEN"] = config["environment"]["HF_TOKEN"]
         else:
             print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() and not config["distributed"]["use_cpu"] else torch.float32
+    dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported() and not config["distributed"]["use_cpu"]) or (torch.backends.mps.is_available() and not config["distributed"]["use_cpu"]) else torch.float32
     assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
 
     local_rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    backend = "gloo" if config["distributed"]["use_cpu"] else "nccl"
+    backend = "gloo" if config["distributed"]["use_cpu"] else "nccl" if torch.cuda.is_available() else "mps"
     
     assert config["training"]["seq_length"] % config["distributed"]["cp_size"] == 0, "seq_length must be divisible by cp_size for Context Parallelism"
     assert world_size == config["distributed"]["tp_size"] * config["distributed"]["pp_size"] * config["distributed"]["dp_size"] * config["distributed"]["cp_size"], "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
@@ -98,7 +98,7 @@ if __name__ == "__main__":
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
     else:
-        device = torch.device("cpu")
+        device = torch.device("mps")
 
     dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
     setup_process_group_manager(
