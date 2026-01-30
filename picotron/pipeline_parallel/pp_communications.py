@@ -2,17 +2,13 @@ import os
 import torch
 import torch.distributed as dist
 import picotron.process_group_manager as pgm
+from picotron.utils import with_device
 
 STEP, VERBOSE = 0, os.environ.get("VERBOSE", "0") == "1"
 
-def _should_sync_cuda(device):
-    """Check if CUDA synchronization is needed and safe."""
-    if not torch.cuda.is_available():
-        return False
-    device_type = device.type if isinstance(device, torch.device) else str(device)
-    return device_type == "cuda"
-
-def pipeline_communicate(operation, device, dtype, tensor=None, shapes=None):
+@with_device
+def pipeline_communicate(operation, dtype, tensor=None, shapes=None, device=None):
+    """Communicate tensors between pipeline stages."""
     global STEP
     global VERBOSE
     if operation == 'recv_forward':
@@ -34,12 +30,12 @@ def pipeline_communicate(operation, device, dtype, tensor=None, shapes=None):
     op = dist.P2POp(dist.isend if is_send else dist.irecv, tensor, peer_rank)
     if VERBOSE: print(f"{operation} | {'sending' if is_send else 'receiving'} {operation.split('_')[1]} {pgm.process_group_manager.pp_rank} {'→' if is_send else '←'} {peer_rank} | STEP:{STEP} | RANK:{pgm.process_group_manager.pp_rank}", flush=True)
     [req.wait() for req in dist.batch_isend_irecv([op])]
-    if _should_sync_cuda(device):
-        torch.cuda.synchronize()
     if VERBOSE: STEP += 1
     return tensor if not is_send else None
 
-def bidirectional_pipeline_communicate(operation, send_tensor, recv_shapes, device, dtype):
+@with_device
+def bidirectional_pipeline_communicate(operation, send_tensor, recv_shapes, dtype, device=None):
+    """Bidirectional communication for pipeline parallelism."""
     global STEP
     global VERBOSE
     is_fwd = (operation == 'send_fwd_recv_bwd')
@@ -49,7 +45,5 @@ def bidirectional_pipeline_communicate(operation, send_tensor, recv_shapes, devi
     reqs = dist.batch_isend_irecv([dist.P2POp(dist.isend, send_tensor, peer_rank), dist.P2POp(dist.irecv, recv_tensor, peer_rank)])
     if VERBOSE: print(f"{operation} | sending {'next' if is_fwd else 'prev'} {pgm.process_group_manager.pp_rank} -> {peer_rank} | "f"receiving {'next' if is_fwd else 'prev'} {peer_rank} -> {pgm.process_group_manager.pp_rank} | "f"STEP {STEP=} | RANK:{pgm.process_group_manager.pp_rank}", flush=True)
     [req.wait() for req in reqs]
-    if _should_sync_cuda(device):
-        torch.cuda.synchronize()
     if VERBOSE: STEP += 1
     return recv_tensor

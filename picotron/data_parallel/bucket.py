@@ -2,6 +2,7 @@ from typing import List
 import torch
 import torch.distributed as dist
 from torch import nn
+from picotron.utils import get_global_device
 
 class Bucket:
     def __init__(self, params: List[torch.nn.Parameter], grad_data: torch.Tensor, process_group: torch.distributed.ProcessGroup) -> None:
@@ -68,7 +69,7 @@ class BucketManager:
             grad_type (torch.dtype, optional): Data type of gradients, defaults to torch.float32.
         """
         self.params = list(params) # Convert parameter generator to a list.
-        self.device = self.params[0].device if self.params[0].is_cuda else torch.device("cpu")
+        self.device = self.params[0].device if len(self.params) > 0 else get_global_device()
         self.buckets = [] # List of buckets.
         self.process_group = process_group
         self.process_group_size = dist.get_world_size(group=self.process_group)

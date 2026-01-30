@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from picotron.context_parallel import context_parallel
 import picotron.process_group_manager as pgm
+from picotron.utils import get_global_device
 
 # Conditionally import flash_attn - not available on macOS
 try:
@@ -32,16 +33,18 @@ def apply_rotary_pos_emb(x, cos, sin):
     return x
 
 def get_cos_sin(seq_length, head_dim, base=500000.0):
-    assert head_dim%2==0
-    # Results on CUDA and CPU are different even with the same formula, To match transformers implementation. frequency should be computed on CPU
+    """Compute cosine and sine for rotary position embeddings."""
+    assert head_dim % 2 == 0
+    # Compute frequency on CPU for numerical consistency
     theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
     dtype = torch.bfloat16 if os.getenv('DTYPE', 'bfloat16') == 'bfloat16' else torch.float32
-    local_rank = int(os.environ["LOCAL_RANK"])
-    device = torch.device('cuda', local_rank) if os.getenv('DEVICE', 'cuda') == 'cuda' else torch.device('mps')
-    position = torch.arange(seq_length).to(device).unsqueeze(1).float() # [seq_length, 1]
-    # To match transformers implementation. m * theta should be computed on GPU
+    device = get_global_device()
+    position = torch.arange(seq_length).to(device).unsqueeze(1).float()  # [seq_length, 1]
+    # m * theta should be computed on the target device
     theta = theta.to(device)
-    return torch.cos(position.float()*theta.float()).to(dtype).repeat(1,2), torch.sin(position.float()*theta.float()).to(dtype).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
+    cos = torch.cos(position.float() * theta.float()).to(dtype).repeat(1, 2)  # [seq_length, head_dim]
+    sin = torch.sin(position.float() * theta.float()).to(dtype).repeat(1, 2)  # [seq_length, head_dim]
+    return cos, sin
 
 def flash_attention(q, k, v, causal = True):
     q = q.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]

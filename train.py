@@ -3,7 +3,6 @@ CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 4 --master_addr localhos
 CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --config tmp/dummy/llama2_7b_benchmark.json
 """
 import os
-import inspect
 import json
 import time
 import datetime
@@ -15,7 +14,11 @@ from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel
 import picotron.process_group_manager as pgm
-from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params, get_theoretical_flops
+from picotron.utils import (
+    average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format,
+    get_mfu, get_num_params, get_theoretical_flops, download_model,
+    set_global_device, get_global_device, with_device, get_memory_usage_gb
+)
 from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
 from picotron.data import MicroBatchDataLoader
@@ -23,19 +26,11 @@ from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
-from picotron.utils import download_model
 import wandb
 
-def get_memory_usage_gb(device):
-    """Get memory usage in GB for the given device."""
-    if torch.cuda.is_available() and device.type == "cuda":
-        return torch.cuda.memory_reserved(device) / 1e9
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and device.type == "mps":
-        return torch.mps.current_allocated_memory() / 1e9
-    else:
-        return 0.0  # CPU doesn't have a direct memory API
-
-def train_step(model, data_loader, device):
+@with_device
+def train_step(model, data_loader, device=None):
+    """Single training step with gradient accumulation."""
     acc_loss = 0.0
     
     requires_grad_sync = pgm.process_group_manager.cp_dp_world_size > 1
@@ -74,7 +69,19 @@ if __name__ == "__main__":
     os.environ["OMP_NUM_THREADS"] = config["environment"]["OMP_NUM_THREADS"]
     os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
     os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"]
-    os.environ["DEVICE"] = "cpu" if config["distributed"]["use_cpu"] else "cuda" if torch.cuda.is_available() else "mps"
+    
+    # Initialize global device (MPS or CPU for Apple Silicon)
+    if config["distributed"]["use_cpu"]:
+        set_global_device("cpu")
+        os.environ["DEVICE"] = "cpu"
+    else:
+        mps_available = torch.backends.mps.is_available()
+        set_global_device("mps" if mps_available else "cpu")
+        os.environ["DEVICE"] = get_global_device().type
+    
+    device = get_global_device()
+    print(f"Device: {device} (MPS available: {torch.backends.mps.is_available()}, use_cpu: {config['distributed']['use_cpu']})")
+    
     if config["environment"].get("HF_TOKEN") is None:
         if "HF_TOKEN" not in os.environ: raise ValueError("HF_TOKEN is neither set in the config file nor in the environment")
     else:
@@ -82,23 +89,20 @@ if __name__ == "__main__":
             os.environ["HF_TOKEN"] = config["environment"]["HF_TOKEN"]
         else:
             print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")
-    dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported() and not config["distributed"]["use_cpu"]) or (torch.backends.mps.is_available() and not config["distributed"]["use_cpu"]) else torch.float32
+    
+    # Use bfloat16 on MPS if available, otherwise float32
+    dtype = torch.bfloat16 if (torch.backends.mps.is_available() and not config["distributed"]["use_cpu"]) else torch.float32
     assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
 
     local_rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    backend = "gloo" if config["distributed"]["use_cpu"] else "nccl" if torch.cuda.is_available() else "mps"
+    # Use gloo backend for CPU, otherwise use the default for MPS
+    backend = "gloo"
     
     assert config["training"]["seq_length"] % config["distributed"]["cp_size"] == 0, "seq_length must be divisible by cp_size for Context Parallelism"
     assert world_size == config["distributed"]["tp_size"] * config["distributed"]["pp_size"] * config["distributed"]["dp_size"] * config["distributed"]["cp_size"], "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
-
-    if backend == "nccl":
-        torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
-    else:
-        device = torch.device("mps")
 
     dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
     setup_process_group_manager(
@@ -170,7 +174,7 @@ if __name__ == "__main__":
     else:
         objects = [None]
 
-    dist.broadcast_object_list(objects, src=0, device=device)
+    dist.broadcast_object_list(objects, src=0, device="cpu")
     model_config = objects[0]
     print(f"rank {pgm.process_group_manager.global_rank}: Broadcasting model_config to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
 
@@ -190,6 +194,7 @@ if __name__ == "__main__":
             model = PipelineParallel(model, model_config)
 
     model = init_model_with_materialized_weights(model, model_config, save_dir=f"./hf_model_safetensors/")
+    #model = torch.compile(model)
 
     #TODO: load existing checkpoint here to continue pre-training
 
@@ -209,11 +214,8 @@ if __name__ == "__main__":
     
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, model_config.hidden_size)
     
+    # Fused Adam not supported on MPS/CPU
     extra_args = dict()
-    if config["model"]["use_fused_adam"]:
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
 
     optimizer = AdamW(model.parameters(), lr=config["training"]["learning_rate"], **extra_args)
     
@@ -231,15 +233,15 @@ if __name__ == "__main__":
         
         if pgm.process_group_manager.pp_world_size > 1:
             if config["distributed"]["pp_engine"] == "afab":
-                loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+                loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, dtype)
             elif config["distributed"]["pp_engine"] == "1f1b":
-                loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype)
+                loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, dtype)
             else:
                 raise ValueError(f"Invalid pipeline parallel engine: {config['distributed']['pp_engine']}")
         else:
-            loss = train_step(model, data_loader, device)
+            loss = train_step(model, data_loader)
             
-        loss = average_loss_across_dp_cp_ranks(loss, device)
+        loss = average_loss_across_dp_cp_ranks(loss)
         
         optimizer.step()
         trained_tokens += tokens_per_step
@@ -251,7 +253,7 @@ if __name__ == "__main__":
         step_duration = time.time() - step_start_time
         tokens_per_second = tokens_per_step / step_duration
         tokens_per_second_per_gpu = tokens_per_second / world_size
-        theoretical_flops = get_theoretical_flops(device)
+        theoretical_flops = get_theoretical_flops()
         mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config, theoretical_flops=theoretical_flops)
         
         if is_wandb_rank:
@@ -264,7 +266,7 @@ if __name__ == "__main__":
                 f"Tokens/s/GPU: {to_readable_format(tokens_per_second_per_gpu):>7s} | "
                 f"Tokens: {to_readable_format(trained_tokens):>7s}{('/' + to_readable_format(config['training']['max_tokens'])) if config['training']['max_tokens'] else ''} | "
                 f"MFU: {mfu:5.2f}% | "
-                f"Memory usage: {get_memory_usage_gb(device):6.2f}GB",
+                f"Memory usage: {get_memory_usage_gb():6.2f}GB",
                 is_print_rank=is_wandb_rank
             )
         
@@ -275,7 +277,7 @@ if __name__ == "__main__":
                     "tokens_per_second": tokens_per_step / step_duration,
                     "mfu": mfu,
                     "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
-                    "memory_usage": get_memory_usage_gb(device),
+                    "memory_usage": get_memory_usage_gb(),
                     "trained_tokens": trained_tokens
                 })
         

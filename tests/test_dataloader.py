@@ -135,10 +135,16 @@ class DummyDataLoader(DataLoader):
 # test the tokens are split correctly in context parallelism
 # TODO: test zigzag behavior
 def test_cp_behavior(TP_SIZE, CP_SIZE, PP_SIZE, DP_SIZE, SEQ_LEN=8):
+    from picotron.utils import set_global_device, get_global_device
+    
     local_rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    backend = "nccl"
+    backend = "gloo"  # Use gloo for MPS/CPU
+
+    # Initialize global device
+    set_global_device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = get_global_device()
 
     assert SEQ_LEN % CP_SIZE == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
     dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method="env://", timeout=datetime.timedelta(minutes=3))
@@ -150,7 +156,7 @@ def test_cp_behavior(TP_SIZE, CP_SIZE, PP_SIZE, DP_SIZE, SEQ_LEN=8):
         dataset_name="roneneldan/TinyStories",
         tokenizer_name="HuggingFaceTB/SmolLM-135M",
         grad_acc_steps=1,
-        device=f"cuda:{local_rank}",
+        device=device,
         num_workers=1,
         num_proc=1,
         num_samples=10,
@@ -179,10 +185,16 @@ def test_cp_behavior(TP_SIZE, CP_SIZE, PP_SIZE, DP_SIZE, SEQ_LEN=8):
 
 # test the infinite loop behavior
 def test_infinite_loop():
+    from picotron.utils import set_global_device, get_global_device
+    
     local_rank = 0
     global_rank = 0
     world_size = 1
-    backend = "nccl"
+    backend = "gloo"  # Use gloo for MPS/CPU
+
+    # Initialize global device
+    set_global_device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = get_global_device()
 
     dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method="env://", timeout=datetime.timedelta(minutes=3))
     setup_process_group_manager(tp_size=1, cp_size=1, pp_size=1, dp_size=1)
@@ -193,7 +205,7 @@ def test_infinite_loop():
         dataset_name="roneneldan/TinyStories",
         tokenizer_name="HuggingFaceTB/SmolLM-135M",
         grad_acc_steps=1,
-        device=f"cuda:{local_rank}",
+        device=device,
         num_workers=1,
         num_proc=1,
         num_samples=2,

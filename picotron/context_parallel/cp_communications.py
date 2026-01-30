@@ -48,8 +48,6 @@ class ContextCommunicate:
                 operation_type = "send" if i % 2 == 0 else "receive"
                 peer_rank = self.send_rank if operation_type == "send" else self.recv_rank
                 print(f"RingComm | wait | STEP:{STEP} | RANK:{self.rank} | "f"ACTION:completed_{operation_type} | "f"{'FROM' if operation_type == 'receive' else 'TO'}:{peer_rank}", flush=True)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
         self._active_requests = None
         self._pending_operations = []
         if VERBOSE: print(f"RingComm | wait | STEP:{STEP} | RANK:{self.rank} | "f"ACTION:all_operations_completed", flush=True)

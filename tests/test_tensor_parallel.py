@@ -1,11 +1,11 @@
 """
-CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 test_tensor_parallel.py
-CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 test_tensor_parallel.py
+torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 test_tensor_parallel.py
+debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 test_tensor_parallel.py
 """
 
 from picotron.process_group_manager import setup_process_group_manager
 from picotron.tensor_parallel.tensor_parallel import ColumnParallelLinear, RowParallelLinear
-from picotron.utils import set_all_seed
+from picotron.utils import set_all_seed, set_global_device, get_global_device
 import torch
 import os
 import torch.distributed as dist
@@ -15,9 +15,12 @@ import picotron.process_group_manager as pgm
 local_rank = int(os.environ["LOCAL_RANK"])
 global_rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
-device = torch.device("cuda", local_rank)
 
-dist.init_process_group(rank=global_rank, world_size=world_size, backend="nccl", init_method=f"env://", timeout=datetime.timedelta(minutes=3))
+# Initialize global device (MPS for Apple Silicon, CPU otherwise)
+set_global_device("mps" if torch.backends.mps.is_available() else "cpu")
+device = get_global_device()
+
+dist.init_process_group(rank=global_rank, world_size=world_size, backend="gloo", init_method=f"env://", timeout=datetime.timedelta(minutes=3))
 setup_process_group_manager(tp_size=world_size, cp_size=1, pp_size=1, dp_size=1)
 
 set_all_seed(42)
