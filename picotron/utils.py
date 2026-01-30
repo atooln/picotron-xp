@@ -4,11 +4,84 @@ import numpy as np
 import builtins
 import fcntl
 import glob
+import functools
+from typing import Union
 
 import huggingface_hub
 
 import picotron.process_group_manager as pgm
 import torch, torch.distributed as dist
+
+# -----------------------------------------------------------------------------
+# Global Device Management for Apple Silicon (MPS/CPU)
+# -----------------------------------------------------------------------------
+
+_global_device: torch.device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+def set_global_device(device: Union[torch.device, str]) -> None:
+    """Set the global device for all operations.
+    
+    Args:
+        device: Either a torch.device or a string ('mps', 'cpu').
+                Defaults to MPS if available, otherwise CPU.
+    """
+    global _global_device
+    if isinstance(device, str):
+        device = torch.device(device)
+    _global_device = device
+
+def get_global_device() -> torch.device:
+    """Get the global device. Auto-initializes to MPS if available, else CPU."""
+    global _global_device
+    if _global_device is None:
+        if torch.backends.mps.is_available():
+            _global_device = torch.device('mps')
+        else:
+            _global_device = torch.device('cpu')
+    return _global_device
+
+def with_device(func=None, *, override=None):
+    """Decorator that injects a device into function kwargs if not provided.
+    
+    The decorated function must accept a 'device' keyword argument.
+    If 'device' is not passed by the caller, it will be set to:
+    - The override device if specified (e.g., 'cpu' for distributed ops)
+    - Otherwise, get_global_device()
+    
+    Examples:
+        @with_device
+        def train_step(model, data_loader, device):
+            input_ids = batch["input_ids"].to(device)
+            ...
+        
+        @with_device(override='cpu')  # For distributed ops that don't support MPS
+        def average_loss(loss, device):
+            reduced = torch.tensor([loss], device=device)
+            dist.all_reduce(reduced)
+            ...
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if 'device' not in kwargs:
+                if override is not None:
+                    kwargs['device'] = torch.device(override)
+                else:
+                    kwargs['device'] = get_global_device()
+            return fn(*args, **kwargs)
+        return wrapper
+    
+    # Handle both @with_device and @with_device(override='cpu') syntax
+    if func is not None:
+        return decorator(func)
+    return decorator
+
+@with_device
+def get_memory_usage_gb(device: torch.device = None) -> float:
+    """Get memory usage in GB for the given device (MPS/CPU)."""
+    if device.type == "mps":
+        return torch.mps.current_allocated_memory() / 1e9
+    return 0.0  # CPU doesn't have a direct memory API
 
 def print(*args, is_print_rank=True, **kwargs):
     """ solves multi-process interleaved print problem """
@@ -21,9 +94,9 @@ def print(*args, is_print_rank=True, **kwargs):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 def set_all_seed(seed):
+    """Set random seeds for reproducibility across all backends."""
     for module in [random, np.random]: module.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
     
 def to_readable_format(num, precision=2):
     if num >= 1e12:
@@ -70,14 +143,13 @@ def get_apple_silicon_flops():
     except Exception as e:
         raise ValueError(f"Error getting Apple Silicon FLOPS: {e}")
 
-def get_theoretical_flops(device):
+@with_device
+def get_theoretical_flops(device: torch.device = None) -> float:
+    """Get theoretical FLOPS for the device. Optimized for Apple Silicon."""
     if device.type == "mps":
-        flops = get_apple_silicon_flops()
-        if flops:
-            return flops
-    
-    # Default to H100 if unknown
-    return 989.5 * 10 ** 12
+        return get_apple_silicon_flops()
+    # Fallback for CPU (conservative estimate)
+    return 100e9  # 100 GFLOPS as a baseline for CPU
 
 def get_mfu(tokens_per_second, num_params, model_config, theoretical_flops=None):
     if theoretical_flops is None:
@@ -104,11 +176,7 @@ def get_num_params(model):
     
     # Count parameters in current PP rank
     local_num_params = 0
-    device = None
     for name, param in model.named_parameters():
-        # Get device from first parameter
-        if device is None:
-            device = param.device
         # Parameters split across TP ranks
         # TODO: LayerNorm is also split across TP ranks for sequence parallelism
         if any(tp_keyword in name.lower() for tp_keyword in ['attention', 'mlp', 'embed', 'final_proj']):
@@ -116,13 +184,9 @@ def get_num_params(model):
         else:
             # Parameters replicated across TP ranks (layer norm, biases)
             local_num_params += param.numel()
-    
-    # If no parameters found, default to CPU
-    if device is None:
-        device = torch.device('cpu')
             
-    # Gather parameter counts from all PP ranks
-    param_counts = torch.tensor(local_num_params, device=device)
+    # Use CPU for distributed ops (MPS doesn't support collective ops)
+    param_counts = torch.tensor(local_num_params, device='cpu')
     
     # Sum up parameters across all PP ranks
     dist.all_reduce(param_counts, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.pp_group)
@@ -141,7 +205,9 @@ def assert_no_meta_tensors(model):
     
     assert len(meta_tensors) == 0, f"Found {len(meta_tensors)} meta tensors:\n" + "\n".join(meta_tensors)
 
-def average_loss_across_dp_cp_ranks(loss, device):
+@with_device(override='cpu')  # Distributed ops don't support MPS
+def average_loss_across_dp_cp_ranks(loss, device: torch.device = None):
+    """Average loss across data parallel and context parallel ranks."""
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
     if pgm.process_group_manager.pp_is_last_stage:
         dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
