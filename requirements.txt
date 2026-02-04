@@ -3,6 +3,7 @@ numpy==1.26.4
 datasets==2.19.1
 transformers==4.57.6
 wandb
+psutil
 huggingface_hub[hf_transfer]
 
 # on mac os, triton and flash-attn are not supported
