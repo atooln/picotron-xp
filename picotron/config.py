@@ -18,6 +18,11 @@ class DistributedConfig:
     context_parallel_size: Optional[int] = None
     pipeline_parallel_size: Optional[int] = None
     data_parallel_size: Optional[int] = None
+    
+    # Runtime fields (populated from environment)
+    local_rank: Optional[int] = None
+    global_rank: Optional[int] = None
+    world_size: Optional[int] = None
 
 @dataclass
 class ModelConfig:
@@ -113,3 +118,9 @@ class PicotronConfig:
                 os.environ["HF_TOKEN"] = self.environment.HF_TOKEN
             else:
                 print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")
+                
+    def setup_distributed_env(self):
+        """Reads distributed environment variables and populates the config."""
+        self.distributed.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.distributed.global_rank = int(os.environ.get("RANK", 0))
+        self.distributed.world_size = int(os.environ.get("WORLD_SIZE", 1))

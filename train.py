@@ -85,9 +85,12 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if (torch.backends.mps.is_available() and not config.distributed.use_cpu) else torch.float32
     assert (dtype == torch.bfloat16 and config.environment.FLASH_ATTEN == "1") or config.environment.FLASH_ATTEN != "1", "Kernel operations requires dtype=torch.bfloat16"
 
-    local_rank = int(os.environ["LOCAL_RANK"])
-    global_rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
+    # Setup distributed environment info
+    config.setup_distributed_env()
+    
+    local_rank = config.distributed.local_rank
+    global_rank = config.distributed.global_rank
+    world_size = config.distributed.world_size
 
     # Use gloo backend for CPU, otherwise use the default for MPS
     backend = "gloo"
