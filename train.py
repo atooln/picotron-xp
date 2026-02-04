@@ -17,7 +17,7 @@ import picotron.process_group_manager as pgm
 from picotron.utils import (
     average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format,
     get_mfu, get_num_params, get_theoretical_flops, download_model,
-    set_global_device, get_global_device, with_device, get_memory_usage_gb
+    set_global_device, get_global_device, with_device, get_memory_usage_gb, setup_global_device
 )
 from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
@@ -70,15 +70,8 @@ if __name__ == "__main__":
     config.setup_environment()
     
     # Initialize global device (MPS or CPU for Apple Silicon)
-    if config.distributed.use_cpu:
-        set_global_device("cpu")
-        os.environ["DEVICE"] = "cpu"
-    else:
-        mps_available = torch.backends.mps.is_available()
-        set_global_device("mps" if mps_available else "cpu")
-        os.environ["DEVICE"] = get_global_device().type
+    device = setup_global_device(config.distributed.use_cpu)
     
-    device = get_global_device()
     print(f"Device: {device} (MPS available: {torch.backends.mps.is_available()}, use_cpu: {config.distributed.use_cpu})")
     
     # Use bfloat16 on MPS if available, otherwise float32

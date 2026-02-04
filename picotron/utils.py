@@ -40,6 +40,25 @@ def get_global_device() -> torch.device:
             _global_device = torch.device('cpu')
     return _global_device
 
+def setup_global_device(use_cpu: bool = False) -> torch.device:
+    """Configures the global device based on preferences and availability.
+    
+    Args:
+        use_cpu: If True, forces the use of CPU. Otherwise tries MPS then CPU.
+        
+    Returns:
+        The selected torch.device.
+    """
+    if use_cpu:
+        device_type = "cpu"
+    else:
+        mps_available = torch.backends.mps.is_available()
+        device_type = "mps" if mps_available else "cpu"
+        
+    set_global_device(device_type)
+    os.environ["DEVICE"] = device_type
+    return get_global_device()
+
 def with_device(func=None, *, override=None):
     """Decorator that injects a device into function kwargs if not provided.
     
@@ -64,6 +83,7 @@ def with_device(func=None, *, override=None):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             if 'device' not in kwargs:
+            # Handle both @with_device and @with_device(override='cpu') syntax
                 if override is not None:
                     kwargs['device'] = torch.device(override)
                 else:
@@ -71,7 +91,6 @@ def with_device(func=None, *, override=None):
             return fn(*args, **kwargs)
         return wrapper
     
-    # Handle both @with_device and @with_device(override='cpu') syntax
     if func is not None:
         return decorator(func)
     return decorator
@@ -130,6 +149,7 @@ def get_apple_silicon_flops():
             "M3": 4.3e12,
             "M3 Pro": 7.3e12,
             "M3 Max": 14e12,
+            "M3 Ultra": 28e12,
             "M3 Ultra": 28e12,
         }
 
