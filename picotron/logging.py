@@ -5,13 +5,14 @@ from typing import Dict, Any, Optional
 import wandb
 import picotron.process_group_manager as pgm
 from picotron.utils import to_readable_format
+from picotron.config import PicotronConfig
 
 class ExperimentLogger:
     """
     A Pythonic, unified logger for distributed training.
     Handles WandB, Console printing, and System Monitoring (M1/Mac).
     """
-    def __init__(self, config: Dict[str, Any], group_name: str = "picotron"):
+    def __init__(self, config: PicotronConfig, group_name: str = "picotron"):
         self.config = config
         self.step = 0
         self.start_time = time.time()
@@ -28,14 +29,14 @@ class ExperimentLogger:
         # Initialize system metrics state
         self.last_system_metrics = self._get_system_metrics() if self.is_main_rank else {}
 
-        if self.is_main_rank and config["logging"]["use_wandb"]:
+        if self.is_main_rank and config.logging.use_wandb:
             wandb.init(
                 project=group_name,
-                name=f"{config['logging']['run_name']}",
-                config=config,
+                name=f"{config.logging.run_name}",
+                config=config.to_dict(),
                 # Resume allowed if run_id provided, otherwise new run
                 resume="allow", 
-                id=config["logging"].get("run_id", None) 
+                id=config.logging.run_id
             )
 
     def log(self, metrics: Dict[str, float], step: Optional[int] = None):
@@ -57,7 +58,7 @@ class ExperimentLogger:
         metrics.update(self.last_system_metrics)
 
         # 2. Log to WandB
-        if self.config["logging"]["use_wandb"]:
+        if self.config.logging.use_wandb:
             wandb.log(metrics, step=self.step)
 
         # 3. Print to Console
@@ -95,7 +96,7 @@ class ExperimentLogger:
         )
 
     def finish(self):
-        if self.is_main_rank and self.config["logging"]["use_wandb"]:
+        if self.is_main_rank and self.config.logging.use_wandb:
             wandb.finish()
 
     def __enter__(self):

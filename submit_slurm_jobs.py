@@ -4,6 +4,7 @@ from jinja2 import Template
 import subprocess
 import json
 from typing import List 
+from picotron.config import PicotronConfig
 
 class Status(Enum):
     # INIT -> PENDING -> [RUNNING | FAIL | TIMEOUT OOM] -> COMPLETED
@@ -68,12 +69,11 @@ class Scheduler:
     def create_slurm_script(self, job: Job):
         # Submit job to the cluster (edit jinja)    
         # load yaml config.yaml
-        with open(job.config, 'r') as file:
-            config = json.load(file)
+        config = PicotronConfig.load(job.config)
         
         max_gpu_per_node = 8
         # Pick the right number of nodes and n_proc_per_node
-        world_size = config["distributed"]["tp_size"] * config["distributed"]["cp_size"] * config["distributed"]["pp_size"] * config["distributed"]["dp_size"]
+        world_size = config.distributed.tp_size * config.distributed.cp_size * config.distributed.pp_size * config.distributed.dp_size
         assert world_size <= max_gpu_per_node or world_size % max_gpu_per_node == 0
         nodes = max(1, world_size // max_gpu_per_node)
         n_proc_per_node = min(max_gpu_per_node, world_size // nodes)

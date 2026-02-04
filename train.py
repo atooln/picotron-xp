@@ -27,7 +27,7 @@ from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
 from picotron.logging import ExperimentLogger
-import wandb
+from picotron.config import PicotronConfig
 
 @with_device
 def train_step(model, data_loader, device=None):
@@ -64,15 +64,14 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="", help="Path to config file")
     args = parser.parse_args()
 
-    with open(args.config, "r") as f:
-        config = json.load(f)
+    config = PicotronConfig.load(args.config)
     
-    os.environ["OMP_NUM_THREADS"] = config["environment"]["OMP_NUM_THREADS"]
-    os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
-    os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"]
+    os.environ["OMP_NUM_THREADS"] = config.environment.OMP_NUM_THREADS
+    os.environ["TOKENIZERS_PARALLELISM"] = config.environment.TOKENIZERS_PARALLELISM
+    os.environ["FLASH_ATTEN"] = config.environment.FLASH_ATTEN
     
     # Initialize global device (MPS or CPU for Apple Silicon)
-    if config["distributed"]["use_cpu"]:
+    if config.distributed.use_cpu:
         set_global_device("cpu")
         os.environ["DEVICE"] = "cpu"
     else:
@@ -81,18 +80,18 @@ if __name__ == "__main__":
         os.environ["DEVICE"] = get_global_device().type
     
     device = get_global_device()
-    print(f"Device: {device} (MPS available: {torch.backends.mps.is_available()}, use_cpu: {config['distributed']['use_cpu']})")
+    print(f"Device: {device} (MPS available: {torch.backends.mps.is_available()}, use_cpu: {config.distributed.use_cpu})")
     
-    if config["environment"].get("HF_TOKEN") is None:
+    if config.environment.HF_TOKEN is None:
         if "HF_TOKEN" not in os.environ: raise ValueError("HF_TOKEN is neither set in the config file nor in the environment")
     else:
         if "HF_TOKEN" not in os.environ:
-            os.environ["HF_TOKEN"] = config["environment"]["HF_TOKEN"]
+            os.environ["HF_TOKEN"] = config.environment.HF_TOKEN
         else:
             print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")
     
     # Use bfloat16 on MPS if available, otherwise float32
-    dtype = torch.bfloat16 if (torch.backends.mps.is_available() and not config["distributed"]["use_cpu"]) else torch.float32
+    dtype = torch.bfloat16 if (torch.backends.mps.is_available() and not config.distributed.use_cpu) else torch.float32
     assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
 
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -102,64 +101,67 @@ if __name__ == "__main__":
     # Use gloo backend for CPU, otherwise use the default for MPS
     backend = "gloo"
     
-    assert config["training"]["seq_length"] % config["distributed"]["cp_size"] == 0, "seq_length must be divisible by cp_size for Context Parallelism"
-    assert world_size == config["distributed"]["tp_size"] * config["distributed"]["pp_size"] * config["distributed"]["dp_size"] * config["distributed"]["cp_size"], "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
+    assert config.training.seq_length % config.distributed.cp_size == 0, "seq_length must be divisible by cp_size for Context Parallelism"
+    assert world_size == config.distributed.tp_size * config.distributed.pp_size * config.distributed.dp_size * config.distributed.cp_size, "world_size must be equal to tp_size * pp_size * dp_size * cp_size"
 
     dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
     setup_process_group_manager(
-        tp_size=config["distributed"]["tp_size"],
-        cp_size=config["distributed"]["cp_size"],
-        pp_size=config["distributed"]["pp_size"],
-        dp_size=config["distributed"]["dp_size"]
+        tp_size=config.distributed.tp_size,
+        cp_size=config.distributed.cp_size,
+        pp_size=config.distributed.pp_size,
+        dp_size=config.distributed.dp_size
     )
     is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
 
-    set_all_seed(config["training"]["seed"])
+    set_all_seed(config.training.seed)
 
     start_time = time.time()
     data_loader = MicroBatchDataLoader(
-        micro_batch_size=config["training"]["micro_batch_size"],
-        seq_length=config["training"]["seq_length"],
-        dataset_name=config["dataset"]["name"],
-        tokenizer_name=config["model"]["name"],
-        grad_acc_steps=config["training"]["gradient_accumulation_steps"],
+        micro_batch_size=config.training.micro_batch_size,
+        seq_length=config.training.seq_length,
+        dataset_name=config.dataset.name,
+        tokenizer_name=config.model.name,
+        grad_acc_steps=config.training.gradient_accumulation_steps,
         device=device,
-        num_workers=config["dataset"]["num_workers"],
-        num_proc=config["dataset"]["num_proc"],
-        num_samples=config["training"].get("num_samples", None),
-        subset_name=config["dataset"].get("subset_name", None),
-        split=config["dataset"].get("split", "train")
+        num_workers=config.dataset.num_workers,
+        num_proc=config.dataset.num_proc,
+        num_samples=config.training.num_samples,
+        subset_name=config.dataset.subset_name,
+        split=config.dataset.split
     )
 
     # download model on the first rank, assume all ranks have access to the same filesystem
     if pgm.process_group_manager.global_rank == 0:
-        download_model(config["model"]["name"], os.environ["HF_TOKEN"])
+        download_model(config.model.name, os.environ["HF_TOKEN"])
 
     dist.barrier()
 
     print(f"init dataloader time: {time.time()-start_time:.2f}s", is_print_rank=is_wandb_rank)
-    tokens_per_step = data_loader.global_batch_size * config["training"]["seq_length"]
+    tokens_per_step = data_loader.global_batch_size * config.training.seq_length
     
     if pgm.process_group_manager.global_rank == 0:
         print("Tokens per step:", to_readable_format(tokens_per_step), is_print_rank=is_wandb_rank)
 
-    if is_wandb_rank and config["logging"]["use_wandb"]:
-        config['logging']['run_name'] = f"{config['logging']['run_name']}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}"
+    if is_wandb_rank and config.logging.use_wandb:
+        config.logging.run_name = f"{config.logging.run_name}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}"
         # Add computed fields to config for wandb logging
-        config['distributed']['tensor_parallel_size'] = pgm.process_group_manager.tp_world_size
-        config['distributed']['context_parallel_size'] = pgm.process_group_manager.cp_world_size
-        config['distributed']['pipeline_parallel_size'] = pgm.process_group_manager.pp_world_size
-        config['distributed']['data_parallel_size'] = pgm.process_group_manager.dp_world_size
-        config['training']['global_batch_size'] = data_loader.global_batch_size
+        config.distributed.tensor_parallel_size = pgm.process_group_manager.tp_world_size
+        config.distributed.context_parallel_size = pgm.process_group_manager.cp_world_size
+        config.distributed.pipeline_parallel_size = pgm.process_group_manager.pp_world_size
+        config.distributed.data_parallel_size = pgm.process_group_manager.dp_world_size
+        config.training.global_batch_size = data_loader.global_batch_size
 
     if pgm.process_group_manager.global_rank == 0:
         print(f"rank {pgm.process_group_manager.global_rank}: Creating model config")
-        model_config = AutoConfig.from_pretrained(config["model"]["name"])
+        model_config = AutoConfig.from_pretrained(config.model.name)
         # twist the model structure if specified in the config file
-        model_config.num_hidden_layers = model_config.num_hidden_layers if "num_hidden_layers" not in config["model"] else config["model"]["num_hidden_layers"]
-        model_config.num_attention_heads = model_config.num_attention_heads if "num_attention_heads" not in config["model"] else config["model"]["num_attention_heads"]
-        model_config.num_key_value_heads = model_config.num_key_value_heads if "num_key_value_heads" not in config["model"] else config["model"]["num_key_value_heads"]
-        model_config.max_position_embeddings = config["training"]["seq_length"]
+        if config.model.num_hidden_layers is not None:
+            model_config.num_hidden_layers = config.model.num_hidden_layers
+        if config.model.num_attention_heads is not None:
+            model_config.num_attention_heads = config.model.num_attention_heads
+        if config.model.num_key_value_heads is not None:
+            model_config.num_key_value_heads = config.model.num_key_value_heads
+        model_config.max_position_embeddings = config.training.seq_length
         objects = [model_config]
     else:
         objects = [None]
@@ -207,28 +209,28 @@ if __name__ == "__main__":
     # Fused Adam not supported on MPS/CPU
     extra_args = dict()
 
-    optimizer = AdamW(model.parameters(), lr=config["training"]["learning_rate"], **extra_args)
+    optimizer = AdamW(model.parameters(), lr=config.training.learning_rate, **extra_args)
     
     checkpoint_manager = CheckpointManager()
 
     trained_tokens, step = 0, 0
-    if config["checkpoint"]["load_path"]:
-        step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, config["checkpoint"]["load_path"])
+    if config.checkpoint.load_path:
+        step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, config.checkpoint.load_path)
     
     dist.barrier()
     
     with ExperimentLogger(config) as logger:
-        while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
+        while config.training.max_tokens is None or trained_tokens < config.training.max_tokens:
             step_start_time = time.time()
             optimizer.zero_grad()
             
             if pgm.process_group_manager.pp_world_size > 1:
-                if config["distributed"]["pp_engine"] == "afab":
+                if config.distributed.pp_engine == "afab":
                     loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, dtype)
-                elif config["distributed"]["pp_engine"] == "1f1b":
+                elif config.distributed.pp_engine == "1f1b":
                     loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, dtype)
                 else:
-                    raise ValueError(f"Invalid pipeline parallel engine: {config['distributed']['pp_engine']}")
+                    raise ValueError(f"Invalid pipeline parallel engine: {config.distributed.pp_engine}")
             else:
                 loss = train_step(model, data_loader)
                 
@@ -258,10 +260,10 @@ if __name__ == "__main__":
                 "progress/trained_tokens": trained_tokens
             }, step=step)
             
-            if step % config["checkpoint"]["save_frequency"] == 0:
-                checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config["checkpoint"]["save_dir"]+f"/{step}")
+            if step % config.checkpoint.save_frequency == 0:
+                checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config.checkpoint.save_dir+f"/{step}")
             
-            if step >= config["training"]["total_train_steps"]:
+            if step >= config.training.total_train_steps:
                 break
 
     dist.destroy_process_group()
