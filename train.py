@@ -78,15 +78,13 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if (torch.backends.mps.is_available() and not config.distributed.use_cpu) else torch.float32
     assert (dtype == torch.bfloat16 and config.environment.FLASH_ATTEN == "1") or config.environment.FLASH_ATTEN != "1", "Kernel operations requires dtype=torch.bfloat16"
 
-    # Setup distributed environment info
+    # Setup distributed environment info (including backend selection)
     config.setup_distributed_env()
     
     local_rank = config.distributed.local_rank
     global_rank = config.distributed.global_rank
     world_size = config.distributed.world_size
-
-    # Use gloo backend for CPU, otherwise use the default for MPS
-    backend = "gloo"
+    backend = config.distributed.backend
     
     assert config.training.seq_length % config.distributed.cp_size == 0, "seq_length must be divisible by cp_size for Context Parallelism"
     assert world_size == config.distributed.tp_size * config.distributed.pp_size * config.distributed.dp_size * config.distributed.cp_size, "world_size must be equal to tp_size * pp_size * dp_size * cp_size"

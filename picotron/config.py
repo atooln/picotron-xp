@@ -124,3 +124,8 @@ class PicotronConfig:
         self.distributed.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.distributed.global_rank = int(os.environ.get("RANK", 0))
         self.distributed.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        
+        # Determine backend
+        if self.distributed.use_cpu:
+            self.distributed.backend = "gloo"
+        # If not cpu, we keep the default from config (usually nccl or mps default)
