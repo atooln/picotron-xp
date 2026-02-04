@@ -26,6 +26,7 @@ from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
+from picotron.logging import ExperimentLogger
 import wandb
 
 @with_device
@@ -143,24 +144,13 @@ if __name__ == "__main__":
         print("Tokens per step:", to_readable_format(tokens_per_step), is_print_rank=is_wandb_rank)
 
     if is_wandb_rank and config["logging"]["use_wandb"]:
-        wandb.init(
-            project="picotron",
-            name=f"{config['logging']['run_name']}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}",
-            config={
-                "tensor_parallel_size": pgm.process_group_manager.tp_world_size,
-                "context_parallel_size": pgm.process_group_manager.cp_world_size,
-                "pipeline_parallel_size": pgm.process_group_manager.pp_world_size,
-                "data_parallel_size": pgm.process_group_manager.dp_world_size,
-                "model": config["model"]["name"],
-                "dataset": config["dataset"]["name"],
-                "max_tokens": config["training"]["max_tokens"],
-                "learning_rate": config["training"]["learning_rate"],
-                "seed": config["training"]["seed"],
-                "micro_batch_size": data_loader.micro_batch_size,
-                "global_batch_size": data_loader.global_batch_size,
-                "gradient_accumulation": data_loader.grad_acc_steps,
-            },
-        )
+        config['logging']['run_name'] = f"{config['logging']['run_name']}_{to_readable_format(tokens_per_step)}_{pgm.process_group_manager}"
+        # Add computed fields to config for wandb logging
+        config['distributed']['tensor_parallel_size'] = pgm.process_group_manager.tp_world_size
+        config['distributed']['context_parallel_size'] = pgm.process_group_manager.cp_world_size
+        config['distributed']['pipeline_parallel_size'] = pgm.process_group_manager.pp_world_size
+        config['distributed']['data_parallel_size'] = pgm.process_group_manager.dp_world_size
+        config['training']['global_batch_size'] = data_loader.global_batch_size
 
     if pgm.process_group_manager.global_rank == 0:
         print(f"rank {pgm.process_group_manager.global_rank}: Creating model config")
@@ -227,67 +217,51 @@ if __name__ == "__main__":
     
     dist.barrier()
     
-    while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
-        step_start_time = time.time()
-        optimizer.zero_grad()
-        
-        if pgm.process_group_manager.pp_world_size > 1:
-            if config["distributed"]["pp_engine"] == "afab":
-                loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, dtype)
-            elif config["distributed"]["pp_engine"] == "1f1b":
-                loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, dtype)
-            else:
-                raise ValueError(f"Invalid pipeline parallel engine: {config['distributed']['pp_engine']}")
-        else:
-            loss = train_step(model, data_loader)
+    with ExperimentLogger(config) as logger:
+        while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
+            step_start_time = time.time()
+            optimizer.zero_grad()
             
-        loss = average_loss_across_dp_cp_ranks(loss)
-        
-        optimizer.step()
-        trained_tokens += tokens_per_step
-        step += 1
-        
-        if hasattr(model, 'reset'):
-            model.reset()
+            if pgm.process_group_manager.pp_world_size > 1:
+                if config["distributed"]["pp_engine"] == "afab":
+                    loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, dtype)
+                elif config["distributed"]["pp_engine"] == "1f1b":
+                    loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, dtype)
+                else:
+                    raise ValueError(f"Invalid pipeline parallel engine: {config['distributed']['pp_engine']}")
+            else:
+                loss = train_step(model, data_loader)
+                
+            loss = average_loss_across_dp_cp_ranks(loss)
+            
+            optimizer.step()
+            trained_tokens += tokens_per_step
+            step += 1
+            
+            if hasattr(model, 'reset'):
+                model.reset()
 
-        step_duration = time.time() - step_start_time
-        tokens_per_second = tokens_per_step / step_duration
-        tokens_per_second_per_gpu = tokens_per_second / world_size
-        theoretical_flops = get_theoretical_flops()
-        mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config, theoretical_flops=theoretical_flops)
-        
-        if is_wandb_rank:
-            print(
-                f"[rank {pgm.process_group_manager.global_rank}] "
-                f"Step: {step:<5d} | "
-                f"Loss: {loss:6.4f} | "
-                f"Global batch size: {to_readable_format(tokens_per_step):>7s} | "
-                f"Tokens/s: {to_readable_format(tokens_per_second):>7s} | "
-                f"Tokens/s/GPU: {to_readable_format(tokens_per_second_per_gpu):>7s} | "
-                f"Tokens: {to_readable_format(trained_tokens):>7s}{('/' + to_readable_format(config['training']['max_tokens'])) if config['training']['max_tokens'] else ''} | "
-                f"MFU: {mfu:5.2f}% | "
-                f"Memory usage: {get_memory_usage_gb():6.2f}GB",
-                is_print_rank=is_wandb_rank
-            )
-        
-            if config["logging"]["use_wandb"]:
-                wandb.log({
-                    "loss": loss,
-                    "tokens_per_step": tokens_per_step,
-                    "tokens_per_second": tokens_per_step / step_duration,
-                    "mfu": mfu,
-                    "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
-                    "memory_usage": get_memory_usage_gb(),
-                    "trained_tokens": trained_tokens
-                })
-        
-        if step % config["checkpoint"]["save_frequency"] == 0:
-            checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config["checkpoint"]["save_dir"]+f"/{step}")
-        
-        if step >= config["training"]["total_train_steps"]:
-            break
-    
-    if is_wandb_rank and config["logging"]["use_wandb"]:
-        wandb.finish()
+            step_duration = time.time() - step_start_time
+            tokens_per_second = tokens_per_step / step_duration
+            tokens_per_second_per_gpu = tokens_per_second / world_size
+            theoretical_flops = get_theoretical_flops()
+            mfu = get_mfu(tokens_per_second_per_gpu, num_params, model_config, theoretical_flops=theoretical_flops)
+            
+            logger.log({
+                "train/loss": loss,
+                "train/lr": optimizer.param_groups[0]['lr'],
+                "perf/tokens_per_step": tokens_per_step,
+                "perf/tokens_per_sec": tokens_per_second,
+                "perf/mfu": mfu,
+                "perf/tokens_per_second_per_gpu": tokens_per_second_per_gpu,
+                "perf/memory_usage_gb": get_memory_usage_gb(),
+                "progress/trained_tokens": trained_tokens
+            }, step=step)
+            
+            if step % config["checkpoint"]["save_frequency"] == 0:
+                checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, config["checkpoint"]["save_dir"]+f"/{step}")
+            
+            if step >= config["training"]["total_train_steps"]:
+                break
 
     dist.destroy_process_group()
