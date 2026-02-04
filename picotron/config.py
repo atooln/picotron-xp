@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
+import torch
 
 @dataclass
 class DistributedConfig:
@@ -10,7 +11,7 @@ class DistributedConfig:
     pp_size: int = 1
     dp_size: int = 1
     pp_engine: str = "1f1b"
-    backend: str = "nccl"
+    backend: str = "gloo"
     use_cpu: bool = False
     
     # Computed fields
@@ -126,6 +127,7 @@ class PicotronConfig:
         self.distributed.world_size = int(os.environ.get("WORLD_SIZE", 1))
         
         # Determine backend
-        if self.distributed.use_cpu:
+        # Default logic: Use "gloo" for CPU or MPS, fallback to config (usually "nccl" or "gloo" for CUDA)
+        if self.distributed.use_cpu or torch.backends.mps.is_available():
             self.distributed.backend = "gloo"
-        # If not cpu, we keep the default from config (usually nccl or mps default)
+        # Otherwise, keep self.distributed.backend which is set by config or defaults to "nccl"
