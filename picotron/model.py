@@ -32,12 +32,11 @@ def apply_rotary_pos_emb(x, cos, sin):
     x = x * cos + rotate_half * sin
     return x
 
-def get_cos_sin(seq_length, head_dim, base=500000.0):
+def get_cos_sin(seq_length, head_dim, base=500000.0, dtype=torch.float32):
     """Compute cosine and sine for rotary position embeddings."""
     assert head_dim % 2 == 0
     # Compute frequency on CPU for numerical consistency
     theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
-    dtype = torch.bfloat16 if os.getenv('DTYPE', 'bfloat16') == 'bfloat16' else torch.float32
     device = get_global_device()
     position = torch.arange(seq_length).to(device).unsqueeze(1).float()  # [seq_length, 1]
     # m * theta should be computed on the target device
@@ -108,6 +107,9 @@ class Attention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_key_values = config.num_key_value_heads
         self.head_dim = self.hidden_size//self.num_heads
+        self.use_flash_attn = getattr(config, 'use_flash_attention', True) and FLASH_ATTN_AVAILABLE
+        self.use_context_parallel = getattr(config, 'context_parallel_size', 1) > 1
+        
         assert config.num_attention_heads % pgm.process_group_manager.tp_world_size == 0, "num_attention_heads should be divisible by tp world size"
         assert config.num_key_value_heads % pgm.process_group_manager.tp_world_size == 0, "num_key_value_heads should be divisible by  tp world size"
         self.num_local_heads = config.num_attention_heads // pgm.process_group_manager.tp_world_size # TP parallelism
@@ -140,8 +142,8 @@ class Attention(nn.Module):
         q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
         k = self.k_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
         v = self.v_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
-        use_flash_attn = os.getenv('FLASH_ATTEN', '1') == '1' and FLASH_ATTN_AVAILABLE
-        if not use_flash_attn:
+        
+        if not self.use_flash_attn:
             q = q.view(batch_size, seq_length, self.num_local_heads, self.head_dim).transpose(1, 2)       # [batch_size, num_heads, seq_length, head_dim]
             k = k.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
             v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
@@ -162,11 +164,11 @@ class Attention(nn.Module):
         causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
         
         # TODO: replace everything with flex attention
-        if os.getenv('CONTEXT_PARALLEL', '0') == '1':
+        if self.use_context_parallel:
             # Ring attention for context parallelism
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
             out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
-        elif use_flash_attn:
+        elif self.use_flash_attn:
             # flash attention, this is faster! 
             out = flash_attention(q, k, v, causal = causal) # [batch_size, seq_length, num_heads, head_dim] 
         else:
@@ -232,7 +234,7 @@ class DecoderLayer(nn.Module):
     # RMSNorm -> Attention -> Residual -> RMSNorm -> MLP -> Residual
     def __init__(self, config, layer_idx):
         super().__init__()
-        use_flash_attn = os.getenv('FLASH_ATTEN', '1') == '1' and FLASH_ATTN_AVAILABLE
+        use_flash_attn = getattr(config, 'use_flash_attention', True) and FLASH_ATTN_AVAILABLE
         RMSNorm = LlamaRMSNorm if not use_flash_attn else TritonRMSNorm
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -240,7 +242,9 @@ class DecoderLayer(nn.Module):
         self.mlp = MLP(config)
         self.layer_idx = layer_idx
         head_dim = config.hidden_size // config.num_attention_heads
-        self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim , base=config.rope_theta) # [max_position_embeddings, head_dim]
+        
+        dtype = getattr(config, 'torch_dtype', torch.float32)
+        self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim , base=config.rope_theta, dtype=dtype) # [max_position_embeddings, head_dim]
 
         # For context parallelism, we split the input. We need to get the correct cos and sin for each split
         self.cos, self.sin = context_parallel.update_rope_for_context_parallel(self.cos, self.sin)
@@ -289,7 +293,8 @@ class Llama(nn.Module):
         self.embedding = Embedding(self.vocab_size, self.hidden_size)
         self.decoder_layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
         self.final_proj = FinalProjection(self.hidden_size, self.vocab_size, bias=False)
-        use_flash_attn = os.getenv('FLASH_ATTEN', '1') == '1' and FLASH_ATTN_AVAILABLE
+        
+        use_flash_attn = getattr(config, 'use_flash_attention', True) and FLASH_ATTN_AVAILABLE
         RMSNorm = LlamaRMSNorm if not use_flash_attn else TritonRMSNorm
         self.final_norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
 

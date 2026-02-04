@@ -153,6 +153,12 @@ if __name__ == "__main__":
         if config.model.num_key_value_heads is not None:
             model_config.num_key_value_heads = config.model.num_key_value_heads
         model_config.max_position_embeddings = config.training.seq_length
+        
+        # Inject picotron-specific config
+        model_config.use_flash_attention = config.model.use_flash_attention
+        model_config.context_parallel_size = config.distributed.cp_size
+        model_config.torch_dtype = dtype
+        
         objects = [model_config]
     else:
         objects = [None]

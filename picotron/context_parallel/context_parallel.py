@@ -8,7 +8,8 @@ import picotron.process_group_manager as pgm
 from picotron.context_parallel.cp_communications import ContextCommunicate
 
 def apply_context_parallel(model):
-    os.environ["CONTEXT_PARALLEL"] = "1" if pgm.process_group_manager.cp_world_size > 1 else "0"
+    # Context parallelism is handled via config checks in Attention class now
+    # We no longer rely on os.environ["CONTEXT_PARALLEL"]
     return model
 
 def ring_attention(q, k, v, sm_scale, is_causal):
