@@ -98,3 +98,18 @@ class PicotronConfig:
     
     def to_dict(self):
         return asdict(self)
+    
+    def setup_environment(self):
+        """Sets up environment variables based on the configuration."""
+        os.environ["OMP_NUM_THREADS"] = self.environment.OMP_NUM_THREADS
+        os.environ["TOKENIZERS_PARALLELISM"] = self.environment.TOKENIZERS_PARALLELISM
+        os.environ["FLASH_ATTEN"] = self.environment.FLASH_ATTEN
+        
+        if self.environment.HF_TOKEN is None:
+            if "HF_TOKEN" not in os.environ: 
+                raise ValueError("HF_TOKEN is neither set in the config file nor in the environment")
+        else:
+            if "HF_TOKEN" not in os.environ:
+                os.environ["HF_TOKEN"] = self.environment.HF_TOKEN
+            else:
+                print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")

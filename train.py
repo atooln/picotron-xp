@@ -66,9 +66,8 @@ if __name__ == "__main__":
 
     config = PicotronConfig.load(args.config)
     
-    os.environ["OMP_NUM_THREADS"] = config.environment.OMP_NUM_THREADS
-    os.environ["TOKENIZERS_PARALLELISM"] = config.environment.TOKENIZERS_PARALLELISM
-    os.environ["FLASH_ATTEN"] = config.environment.FLASH_ATTEN
+    # Setup environment variables (OMP, TOKENIZERS, FLASH_ATTEN, HF_TOKEN)
+    config.setup_environment()
     
     # Initialize global device (MPS or CPU for Apple Silicon)
     if config.distributed.use_cpu:
@@ -82,17 +81,9 @@ if __name__ == "__main__":
     device = get_global_device()
     print(f"Device: {device} (MPS available: {torch.backends.mps.is_available()}, use_cpu: {config.distributed.use_cpu})")
     
-    if config.environment.HF_TOKEN is None:
-        if "HF_TOKEN" not in os.environ: raise ValueError("HF_TOKEN is neither set in the config file nor in the environment")
-    else:
-        if "HF_TOKEN" not in os.environ:
-            os.environ["HF_TOKEN"] = config.environment.HF_TOKEN
-        else:
-            print("Warning: HF_TOKEN is set in the environment and the config file. Using the environment variable.")
-    
     # Use bfloat16 on MPS if available, otherwise float32
     dtype = torch.bfloat16 if (torch.backends.mps.is_available() and not config.distributed.use_cpu) else torch.float32
-    assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
+    assert (dtype == torch.bfloat16 and config.environment.FLASH_ATTEN == "1") or config.environment.FLASH_ATTEN != "1", "Kernel operations requires dtype=torch.bfloat16"
 
     local_rank = int(os.environ["LOCAL_RANK"])
     global_rank = int(os.environ["RANK"])
